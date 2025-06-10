@@ -1,0 +1,17 @@
+{
+  "name": "turtle-nft-starterr",
+  "scripts": {
+    "deploy:ethereum": "npx hardhat ignition deploy ignition/modules/TurtleNFT.ts --network ethereum --verify",
+    "deploy:sepolia": "npx hardhat ignition deploy ignition/modules/TurtleNFT.ts --network sepolia --verify",
+    "test": "npx hardhat test"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "dotenv": "^16.4.7",
+    "hardhat": "^2.22.18",
+    "hardhat-contract-sizer": "^2.10.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^4.9.3"
+  }
+}
