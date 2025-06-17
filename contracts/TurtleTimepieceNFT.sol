@@ -19,7 +19,7 @@ contract TurtleTimepieceNFT is ERC721URIStorage, Ownable, ReentrancyGuard, Pausa
     Counters.Counter private _tokenIds;
     
     // Maximum supply of NFTs
-    uint256 public constant MAX_SUPPLY = 1;
+    uint256 public constant MAX_SUPPLY = 20;
     
     // Price per NFT in ETH
     uint256 public mintPrice = 0.001 ether;
@@ -27,14 +27,17 @@ contract TurtleTimepieceNFT is ERC721URIStorage, Ownable, ReentrancyGuard, Pausa
     // IPFS folder CID
     string private constant IPFS_FOLDER = "QmUxwjKEFoWAmeCQfRBxhVsDar9CMpqBtCEHgpgW3nEE8M";
     
-    // Mapping to track which tokens are available for sale
-    mapping(uint256 => bool) public isTokenForSale;
+    // Maps each tokenId to the address of the user who purchased the NFT using Stripe payment.
+    mapping(uint256 => address) public stripePaidUser;
+
+    // Maps each tokenId to its sold status.
+    mapping(uint256 => bool) public isTokenSold;
     
     // Events
     event NFTMinted(address owner, uint256 tokenId, string tokenURI);
     event NFTSold(address from, address to, uint256 tokenId, uint256 price);
-    event TokenPutForSale(uint256 tokenId);
-    event TokenRemovedFromSale(uint256 tokenId);
+    event TokenSoldWithStripe(uint256 tokenId, address user);
+    event TokenSaleUpdated(uint256 tokenId, address oldBuyer, address newBuyer);
     event TokenClaimed(uint256 tokenId, address claimer);
     event ContractPaused(address indexed by);
     event ContractUnpaused(address indexed by);
@@ -59,7 +62,6 @@ contract TurtleTimepieceNFT is ERC721URIStorage, Ownable, ReentrancyGuard, Pausa
             
             console.log("Setting URI for token %s: %s", Strings.toString(i), uri);
             _setTokenURI(i, uri);
-            isTokenForSale[i] = true; // Mark token as available for sale
             emit NFTMinted(owner, i, uri);
         }
     }
@@ -112,16 +114,19 @@ contract TurtleTimepieceNFT is ERC721URIStorage, Ownable, ReentrancyGuard, Pausa
     /**
      * @dev Put a token up for sale or remove it from sale
      * @param tokenId The token to modify sale status
-     * @param forSale Whether the token should be for sale
+     * @param user The user's address
      */
-    function setTokenSaleStatus(uint256 tokenId, bool forSale) external {
+    function setStripePaidUser(uint256 tokenId, address user) external onlyOwner {
         require(_exists(tokenId), "Token does not exist");
-        require(ownerOf(tokenId) == _msgSender(), "Not token owner");
-        isTokenForSale[tokenId] = forSale;
-        if (forSale) {
-            emit TokenPutForSale(tokenId);
+        require(!isTokenSold[tokenId], "Token already sold out");
+        
+        address oldBuyer = stripePaidUser[tokenId];
+        stripePaidUser[tokenId] = user;
+        
+        if (oldBuyer == address(0) && user != address(0)) {
+            emit TokenSoldWithStripe(tokenId, user);
         } else {
-            emit TokenRemovedFromSale(tokenId);
+            emit TokenSaleUpdated(tokenId, oldBuyer, user);
         }
     }
 
@@ -131,13 +136,14 @@ contract TurtleTimepieceNFT is ERC721URIStorage, Ownable, ReentrancyGuard, Pausa
      */
     function claimToken(uint256 tokenId) external nonReentrant whenNotPaused {
         require(_exists(tokenId), "Token does not exist");
-        require(isTokenForSale[tokenId], "Token is not available for claiming");
-        
+        require(msg.sender == stripePaidUser[tokenId], "Token is not available for claiming");
+        require(!isTokenSold[tokenId], "Token already sold out");
+
         address tokenOwner = ownerOf(tokenId);
         require(tokenOwner == owner(), "Token not owned by contract owner");
         
         _transfer(tokenOwner, msg.sender, tokenId);
-        isTokenForSale[tokenId] = false;
+        isTokenSold[tokenId] = true;
         
         emit TokenClaimed(tokenId, msg.sender);
     }
@@ -148,7 +154,8 @@ contract TurtleTimepieceNFT is ERC721URIStorage, Ownable, ReentrancyGuard, Pausa
      */
     function purchaseNFT(uint256 tokenId) external payable nonReentrant whenNotPaused {
         require(_exists(tokenId), "Token does not exist");
-        require(isTokenForSale[tokenId], "Token is not for sale");
+        require(!isTokenSold[tokenId], "Token already sold out");
+        require(stripePaidUser[tokenId] == address(0), "Token already sold out via Stripe");
         require(msg.value >= mintPrice, "Insufficient ETH sent");
         
         address seller = ownerOf(tokenId);
@@ -161,10 +168,10 @@ contract TurtleTimepieceNFT is ERC721URIStorage, Ownable, ReentrancyGuard, Pausa
         _transfer(seller, msg.sender, tokenId);
         
         // Mark token as not for sale after purchase
-        isTokenForSale[tokenId] = false;
+        isTokenSold[tokenId] = true;
         
         // Transfer payment to the seller
-        (bool success, ) = payable(seller).call{value: mintPrice}("");
+        (bool success, ) = payable(owner()).call{value: mintPrice}("");
         require(success, "Payment to seller failed");
         
         // Refund excess ETH to buyer
@@ -184,14 +191,14 @@ contract TurtleTimepieceNFT is ERC721URIStorage, Ownable, ReentrancyGuard, Pausa
     }
     
     /**
-     * @dev Returns array of token IDs that are available for sale
+     * @dev Returns array of token IDs that have been sold out
      */
-    function getTokensForSale() external view returns (uint256[] memory) {
+    function getSoldTokenIDs() external view returns (uint256[] memory) {
         uint256[] memory tokensForSale = new uint256[](_tokenIds.current());
         uint256 count = 0;
         
         for (uint256 i = 1; i <= _tokenIds.current(); i++) {
-            if (isTokenForSale[i]) {
+            if (isTokenSold[i]) {
                 tokensForSale[count] = i;
                 count++;
             }
@@ -203,6 +210,28 @@ contract TurtleTimepieceNFT is ERC721URIStorage, Ownable, ReentrancyGuard, Pausa
             result[i] = tokensForSale[i];
         }
         
+        return result;
+    }
+
+    function getUnclaimedIDsWithStripe() external view returns (uint256[] memory) {
+        uint256 total = _tokenIds.current();
+        uint256 count = 0;
+
+        // First, determine the number of unclaimed IDs with Stripe
+        for (uint256 i = 1; i <= total; i++) {
+            if (!isTokenSold[i] && stripePaidUser[i] != address(0)) {
+                count++;
+            }
+        }
+
+        uint256[] memory result = new uint256[](count);
+        uint256 idx = 0;
+        for (uint256 i = 1; i <= total; i++) {
+            if (!isTokenSold[i] && stripePaidUser[i] != address(0)) {
+                result[idx] = i;
+                idx++;
+            }
+        }
         return result;
     }
 } 
